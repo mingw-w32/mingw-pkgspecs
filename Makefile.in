@@ -1,0 +1,179 @@
+# @configure_input@
+# --------------------------------------------------------------------------
+#
+# Top-level makefile for MinGW.OSDN base package specification generator
+# and patch queue instantiation system.
+#
+# $Id$
+#
+# Written by Keith Marshall <keith@users.osdn.me>
+# Copyright (C) 2022, MinGW.OSDN Project
+#
+#
+# Permission is hereby granted, free of charge, to any person obtaining a
+# copy of this software and associated documentation files (the "Software"),
+# to deal in the Software without restriction, including without limitation
+# the rights to use, copy, modify, merge, publish, distribute, sublicense,
+# and/or sell copies of the Software, and to permit persons to whom the
+# Software is furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice (including the next
+# paragraph) shall be included in all copies or substantial portions of the
+# Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+# OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR THE COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+# FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+# DEALINGS IN THE SOFTWARE.
+#
+# --------------------------------------------------------------------------
+#
+# The default target is "all"; declare it early, to avoid any possible
+# inadvertent override from any included file.
+#
+all:
+
+# Specify a default copyright assignment for all managed package
+# specifications; (this may be overridden, for individual packages,
+# by target-specific reassignment within respective Makefile.sub
+# files, included from corresponding subdirectories).
+#
+COPYRIGHT_OWNER := MinGW.OSDN Project
+COPYRIGHT_YEARS := $(shell date +%Y)
+
+# Configuration
+# -------------
+# Establish the target system architecture, and the build system
+# directory, as identified by running the configure script; (note
+# that users may choose to overide the configured $(ARCH) setting
+# when running make with an ARCH=<alt-value> argument).
+#
+ARCH := @ARCH@
+srcdir := @srcdir@
+abs_srcdir = @abs_srcdir@
+top_srcdir = @top_srcdir@
+
+# Keep the configuration in a consistent state.  Note that we assume
+# that configure has been run initially, (otherwise we wouldn't have
+# a Makefile to begin with); since this also creates config.status,
+# we may normally assume that it is already available ...
+#
+vpath configure ${top_srcdir}
+config.status: configure
+	$(SHELL) config.status --recheck
+
+# ... in which case, updating Makefile should be a simple matter of
+# running config.status ...
+#
+vpath Makefile.in ${top_srcdir}
+requires_existing = $(if $(wildcard $1),$1,$1.missing)
+Makefile: configure $(call requires_existing,config.status) Makefile.in
+	$(SHELL) config.status
+
+.PHONY: config.status.missing
+# ... but, in the event that this may be missing, (e.g. because it
+# has been manually removed, or removed by "make distclean"), suggest
+# running configure, and bail out.
+#
+config.status.missing:
+	$(warning *** cannot execute config.status)
+	$(error please run ${top_srcdir}/configure to regenerate it.)
+
+# If configure itself needs to be updated, we must run autoconf in the
+# top level source directory.
+#
+vpath %.m4 ${top_srcdir}
+vpath configure.ac ${top_srcdir}
+configure: configure.ac # aclocal.m4 VERSION.m4
+	cd ${top_srcdir}; autoconf
+
+# Output File Generation
+# ----------------------
+# Classified into per-package groupings of package specification files,
+# and patch queue files, each package is managed in terms of a collection
+# of files within their respective package specific subdirectories, which
+# are identified by makefile fragments within those subdirectories.
+#
+subdirs := none
+$(foreach f,$(wildcard ${srcdir}/*/Makefile.sub),$(eval include $f))
+active_subdirs := $(filter-out none,$(subdirs))
+$(active_subdirs): %: %-specfiles %-patchset
+archdir := arch/$(ARCH)
+
+all: $(active_subdirs)
+PACKAGE_TAGSPEC = $(PACKAGE_DIRNAME)-$(PACKAGE_VERSION)
+PACKAGE_TARNAME = $(PACKAGE_TAGSPEC)-$(ARCH)
+.PRECIOUS: %/${archdir}
+
+%/${archdir}:
+	@MKDIR_P@ $@
+
+%-specfiles: %/${archdir} %-clean-specfiles
+	@$(if $(call specfile_select,$*),$(specfile_notice))
+	@$(foreach f,$(call specfile_select,$*),$(call specfile_create,$f,$<);)
+	@$(foreach f,$(PACKAGE_EXTRAS),$(call adjunct_create,$f,$<);)
+
+%-patchset: %/${archdir} %-clean-patchset
+	@$(call patchfile_store,$*,$(wildcard ${abs_srcdir}/$*/patches/series))
+
+specfiles := pkgspec xconfig
+specfile_notice = $(info Generate $* package specification files...)
+specfile_select = $(wildcard $(addprefix ${srcdir}/$1/,$(specfiles)))
+specfile_create = $(specfile_filter) $1 > $2/$(PACKAGE_TARNAME).$(notdir $1)
+specfile_locate = $(info $- $*/${archdir}/$(PACKAGE_TARNAME).$(notdir $1))
+specfile_filter = $(specfile_locate)$(specfile_output)
+specfile_output = @SED@ -e 's?%ARCH%?$(ARCH)?' \
+  -e 's?%PACKAGE_TARNAME%?$(PACKAGE_TARNAME)?' \
+  -e 's?%PACKAGE_DIRNAME%?$(PACKAGE_DIRNAME)?' \
+  -e 's?%PACKAGE_VERSION%?$(PACKAGE_VERSION)?' \
+  -e 's?%PACKAGE_RELEASE%?$(PACKAGE_RELEASE)?' \
+  -e 's?%COPYRIGHT_OWNER%?$(COPYRIGHT_OWNER)?' \
+  -e 's?%COPYRIGHT_YEARS%?$(COPYRIGHT_YEARS)?'
+
+adjunct_create = $(adjunct_locate)$(specfile_output) ${srcdir}/$*/$1 > $2/$1
+adjunct_locate = $(info $- $*/${archdir}/$1)
+
+patchfile_store = @AWK@ '\
+  NF == 1 { patchset[idmax = NR] = $$1 } \
+  NR == 1 { print "Collect $1 patches..." } \
+  END { cmd = "@LN_S@ -f $(dir $2)%1$$s $1/${archdir}/%2$$0*3$$d-%1$$s"; \
+    if ((idmax < 10) || (idmax = 1 + int(log(ct) / log(10))) < 2) idmax = 2; \
+    for (id in patchset) { \
+      printf (" %0*d-%s\n", idmax, id, patchset[id]); \
+      patchset[id] = sprintf (cmd, patchset[id], id, idmax); \
+      if (system (patchset[id])) exit (1); \
+    } \
+  }' /dev/null $2
+
+# Build Directory Clean-Up
+# ------------------------
+#
+clean mostlyclean:
+	$(RM) -r *~ $(addsuffix /arch,$(filter-out none,$(subdirs)))
+
+distclean: clean
+	$(RM) -r autom4te.cache config.* Makefile
+
+maintainer-clean: distclean maintainer-clean-autom4te
+maintainer-clean-autom4te: $(wildcard ${srcdir}/autom4te.cache ${srcdir}/*~)
+	$(if $^,$(RM) -r $^)
+
+%-clean-specfiles:
+	@$(if $(stale_specfiles),$(call stale_cleanup,$*,specification))
+	@$(foreach f,$(stale_specfiles) $(stale_adjunct),$(info $- $f))
+	@$(RM) $(stale_specfiles) $(stale_adjunct)
+
+stale_cleanup = $(info Remove stale $1 $2 files...)
+stale_adjunct = $(wildcard $(addprefix $*/${archdir}/,$(PACKAGE_EXTRAS)))
+stale_specfiles = $(wildcard $(addprefix $*/${archdir}/*.,$(specfiles)))
+stale_patchfiles = $(wildcard $*/${archdir}/*.patch)
+
+%-clean-patchset:
+	@$(if $(stale_patchfiles),$(call stale_cleanup,$*,patch))
+	@$(foreach f,$(stale_patchfiles),$(info $- $f))
+	@$(RM) $(stale_patchfiles)
+#
+# $RCSfile$: end of file

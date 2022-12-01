@@ -1,0 +1,7 @@
+arch/
+config.*
+configure
+autom4te.cache/
+Makefile
+build/
+*~
